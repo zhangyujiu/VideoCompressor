@@ -55,12 +55,33 @@ class JvmFFmpegService : FFmpegService {
             println("JVM转码: 输出路径: $actualOutputPath")
             println("JVM转码: FFmpeg命令: ${command.joinToString(" ")}")
             
+            // 验证输入文件存在
+            val inputFile = java.io.File(task.inputFile.path)
+            if (!inputFile.exists()) {
+                emit(TranscodeProgress(
+                    taskId = task.id,
+                    status = TaskStatus.FAILED,
+                    progress = 0f,
+                    errorMessage = "输入文件不存在: ${task.inputFile.path}"
+                ))
+                return@flow
+            }
+            
             // 确保输出目录存在
             val outputFileForDir = java.io.File(actualOutputPath)
             val outputDir = outputFileForDir.parentFile
             if (outputDir != null && !outputDir.exists()) {
-                outputDir.mkdirs()
-                println("JVM转码: 创建输出目录: ${outputDir.absolutePath}")
+                val created = outputDir.mkdirs()
+                println("JVM转码: 创建输出目录: ${outputDir.absolutePath}, 成功: $created")
+                if (!created && !outputDir.exists()) {
+                    emit(TranscodeProgress(
+                        taskId = task.id,
+                        status = TaskStatus.FAILED,
+                        progress = 0f,
+                        errorMessage = "无法创建输出目录: ${outputDir.absolutePath}"
+                    ))
+                    return@flow
+                }
             }
             
             // 启动FFmpeg进程
@@ -69,6 +90,22 @@ class JvmFFmpegService : FFmpegService {
             
             val process = processBuilder.start()
             activeProcesses[task.id] = process
+            
+            // 启动线程监控FFmpeg输出
+            val outputReader = Thread {
+                try {
+                    val reader = BufferedReader(InputStreamReader(process.inputStream))
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        println("FFmpeg输出: $line")
+                        // 这里可以解析FFmpeg的输出来获取真实的进度信息
+                    }
+                    reader.close()
+                } catch (e: Exception) {
+                    println("FFmpeg输出读取错误: ${e.message}")
+                }
+            }
+            outputReader.start()
             
             emit(TranscodeProgress(
                 taskId = task.id,
@@ -102,21 +139,7 @@ class JvmFFmpegService : FFmpegService {
                 if (reached98Time != null && (System.currentTimeMillis() - reached98Time) > 5_000L) {
                     println("JVM转码: 98%后5秒已过，强制完成转码")
                     process.destroyForcibly() // 强制终止进程
-
-                    // 直接标记为完成，不检查文件
-                    taskStatuses[task.id] = TaskStatus.COMPLETED
-                    println("JVM转码: 强制完成 - 任务ID: ${task.id}")
-                    val completedProgress = TranscodeProgress(
-                        taskId = task.id,
-                        status = TaskStatus.COMPLETED,
-                        progress = 1f,
-                        speed = "完成",
-                        estimatedTimeRemaining = 0
-                    )
-                    taskProgress[task.id] = completedProgress
-                    println("JVM转码: 发送强制完成状态到界面")
-                    emit(completedProgress)
-                    return@flow
+                    break // 跳出循环，让后续的文件检查逻辑处理
                 }
 
                 val currentProgress = TranscodeProgress(
@@ -146,11 +169,18 @@ class JvmFFmpegService : FFmpegService {
             println("JVM转码: 进度监控循环结束 - 进程存活: ${process.isAlive}, 任务状态: ${taskStatuses[task.id]}")
 
             // 等待进程完成（如果还没完成）
-            val exitCode = process.waitFor()
+            val exitCode = if (process.isAlive) {
+                process.waitFor()
+            } else {
+                process.exitValue()
+            }
 
             activeProcesses.remove(task.id)
 
             println("JVM转码: 进程完成，退出码: $exitCode")
+
+            // 等待一小段时间确保文件系统操作完成
+            kotlinx.coroutines.delay(500)
 
             // 检查输出文件是否存在
             val outputFile = java.io.File(actualOutputPath)
@@ -159,23 +189,20 @@ class JvmFFmpegService : FFmpegService {
 
             println("JVM转码: 输出文件检查 - 路径: $actualOutputPath, 存在: $fileExists, 大小: $fileSize bytes")
 
-            if (exitCode == 0 && fileExists && fileSize > 0 && taskStatuses[task.id] != TaskStatus.CANCELLED) {
-                taskStatuses[task.id] = TaskStatus.COMPLETED
-                println("JVM转码: 转码成功完成 - 任务ID: ${task.id}")
-                println("JVM转码: 输出文件验证 - 存在: $fileExists, 大小: $fileSize bytes")
-                val completedProgress = TranscodeProgress(
-                    taskId = task.id,
-                    status = TaskStatus.COMPLETED,
-                    progress = 1f,
-                    speed = "完成",
-                    estimatedTimeRemaining = 0
-                )
-                taskProgress[task.id] = completedProgress
-                println("JVM转码: 发送完成状态到界面")
-                emit(completedProgress)
-                println("JVM转码: 完成状态已发送")
-            } else if (taskStatuses[task.id] == TaskStatus.CANCELLED) {
+            // 检查任务是否被取消
+            if (taskStatuses[task.id] == TaskStatus.CANCELLED) {
                 println("JVM转码: 转码已取消")
+                
+                // 如果取消时生成了部分文件，删除它
+                if (fileExists) {
+                    try {
+                        outputFile.delete()
+                        println("JVM转码: 已删除取消转码时生成的部分文件: $actualOutputPath")
+                    } catch (e: Exception) {
+                        println("JVM转码: 删除部分文件失败: ${e.message}")
+                    }
+                }
+                
                 val cancelledProgress = TranscodeProgress(
                     taskId = task.id,
                     status = TaskStatus.CANCELLED,
@@ -185,6 +212,43 @@ class JvmFFmpegService : FFmpegService {
                 )
                 taskProgress[task.id] = cancelledProgress
                 emit(cancelledProgress)
+            } else if (exitCode == 0) {
+                // 进程正常退出，但需要检查文件
+                if (fileExists && fileSize > 0) {
+                    taskStatuses[task.id] = TaskStatus.COMPLETED
+                    println("JVM转码: 转码成功完成 - 任务ID: ${task.id}")
+                    println("JVM转码: 输出文件验证 - 存在: $fileExists, 大小: $fileSize bytes")
+                    val completedProgress = TranscodeProgress(
+                        taskId = task.id,
+                        status = TaskStatus.COMPLETED,
+                        progress = 1f,
+                        speed = "完成",
+                        estimatedTimeRemaining = 0
+                    )
+                    taskProgress[task.id] = completedProgress
+                    println("JVM转码: 发送完成状态到界面")
+                    emit(completedProgress)
+                    println("JVM转码: 完成状态已发送")
+                } else {
+                    // 进程正常退出但文件有问题
+                    taskStatuses[task.id] = TaskStatus.FAILED
+                    val errorMessage = if (!fileExists) {
+                        "转码失败: 输出文件未生成 (进程正常退出但无文件)"
+                    } else {
+                        "转码失败: 输出文件为空 (进程正常退出但文件大小为0)"
+                    }
+                    println("JVM转码: $errorMessage")
+                    val failedProgress = TranscodeProgress(
+                        taskId = task.id,
+                        status = TaskStatus.FAILED,
+                        progress = 0f,
+                        speed = "失败",
+                        estimatedTimeRemaining = 0,
+                        errorMessage = errorMessage
+                    )
+                    taskProgress[task.id] = failedProgress
+                    emit(failedProgress)
+                }
             } else {
                 taskStatuses[task.id] = TaskStatus.FAILED
                 val errorMessage = if (!fileExists) {
@@ -222,11 +286,28 @@ class JvmFFmpegService : FFmpegService {
     
     override suspend fun stopTranscode(taskId: String): Result<Unit> {
         return try {
+            println("JVM转码: 开始停止转码 - 任务ID: $taskId")
             taskStatuses[taskId] = TaskStatus.CANCELLED
-            activeProcesses[taskId]?.destroy()
+            
+            // 强制终止进程
+            activeProcesses[taskId]?.let { process ->
+                println("JVM转码: 终止FFmpeg进程")
+                process.destroyForcibly()
+                
+                // 等待进程完全终止
+                try {
+                    process.waitFor()
+                    println("JVM转码: FFmpeg进程已终止")
+                } catch (e: Exception) {
+                    println("JVM转码: 等待进程终止时出错: ${e.message}")
+                }
+            }
+            
             activeProcesses.remove(taskId)
+            println("JVM转码: 转码停止完成 - 任务ID: $taskId")
             Result.success(Unit)
         } catch (e: Exception) {
+            println("JVM转码: 停止转码时出错: ${e.message}")
             Result.failure(e)
         }
     }
