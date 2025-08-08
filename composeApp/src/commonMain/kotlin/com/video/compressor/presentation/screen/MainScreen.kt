@@ -27,6 +27,7 @@ import org.koin.compose.koinInject
 @Composable
 fun MainScreen(
     onVideoSelected: (VideoFile) -> Unit = {},
+    onFormatConvert: (VideoFile) -> Unit = {},
     ffmpegAvailable: Boolean? = null, // null表示检测中
     onRefreshFFmpegStatus: () -> Unit = {},
     fileService: FileService = koinInject(),
@@ -162,7 +163,8 @@ fun MainScreen(
                 items(selectedVideos) { video ->
                     VideoFileCard(
                         videoFile = video,
-                        onClick = { onVideoSelected(video) },
+                        onTranscode = { onVideoSelected(video) },
+                        onFormatConvert = { onFormatConvert(video) },
                         onRemove = {
                             selectedVideos = selectedVideos - video
                         }
@@ -262,15 +264,14 @@ private fun EmptyStateCard(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VideoFileCard(
     videoFile: VideoFile,
-    onClick: () -> Unit,
+    onTranscode: () -> Unit,
+    onFormatConvert: () -> Unit,
     onRemove: () -> Unit
 ) {
     Card(
-        onClick = onClick,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -319,13 +320,25 @@ private fun VideoFileCard(
                 )
             }
 
-            // 点击提示
-            Text(
-                text = "💡 点击卡片进入转码设置",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Medium
-            )
+            // 操作按钮
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onTranscode,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("转码压缩")
+                }
+                
+                OutlinedButton(
+                    onClick = onFormatConvert,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("格式转换")
+                }
+            }
         }
     }
 }

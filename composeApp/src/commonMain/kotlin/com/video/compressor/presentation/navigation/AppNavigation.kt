@@ -27,6 +27,7 @@ import com.video.compressor.domain.model.VideoFile
 import com.video.compressor.domain.service.FFmpegService
 import com.video.compressor.domain.service.TranscodeProgress
 import com.video.compressor.presentation.screen.DiagnosticsScreen
+import com.video.compressor.presentation.screen.FormatConvertScreen
 import com.video.compressor.presentation.screen.MainScreen
 import com.video.compressor.presentation.screen.SettingsScreen
 import com.video.compressor.presentation.screen.TaskManagerScreen
@@ -42,6 +43,7 @@ import kotlin.random.Random
 sealed class Screen {
     object Main : Screen()
     data class TranscodeConfig(val videoFile: VideoFile) : Screen()
+    data class FormatConvert(val videoFile: VideoFile) : Screen()
     data class TranscodeProgress(val task: TranscodeTask) : Screen()
     object TaskManager : Screen()
     object Settings : Screen()
@@ -75,6 +77,11 @@ fun AppNavigation(
         }
     }
 
+    fun navigateToHome() {
+        navigationStack = listOf(Screen.Main)
+        println("AppNavigation: 导航到主页，栈深度: ${navigationStack.size}")
+    }
+
     // 任务管理状态
     var allTasks by remember { mutableStateOf<List<TranscodeTask>>(emptyList()) }
     var taskProgressMap by remember { mutableStateOf<Map<String, TranscodeProgress>>(emptyMap()) }
@@ -106,6 +113,7 @@ fun AppNavigation(
     val currentTitle = when (currentScreen) {
         is Screen.Main -> "视频压缩器"
         is Screen.TranscodeConfig -> "转码设置"
+        is Screen.FormatConvert -> "格式转换"
         is Screen.TranscodeProgress -> "转码进度"
         is Screen.TaskManager -> "任务管理"
         is Screen.Settings -> "设置"
@@ -168,6 +176,9 @@ fun AppNavigation(
                 onVideoSelected = { videoFile ->
                     navigateTo(Screen.TranscodeConfig(videoFile))
                 },
+                onFormatConvert = { videoFile ->
+                    navigateTo(Screen.FormatConvert(videoFile))
+                },
                 ffmpegAvailable = ffmpegAvailable,
                 onRefreshFFmpegStatus = {
                     // 强制重新检测FFmpeg状态
@@ -223,6 +234,45 @@ fun AppNavigation(
             )
         }
         
+        is Screen.FormatConvert -> {
+            FormatConvertScreen(
+                videoFile = screen.videoFile,
+                onBack = {
+                    navigateBack()
+                },
+                onStartConvert = { videoParams, audioParams, outputPath ->
+                    val task = TranscodeTask(
+                        id = Random.nextLong().toString(),
+                        inputFile = screen.videoFile,
+                        outputPath = outputPath,
+                        videoParameters = videoParams,
+                        audioParameters = audioParams,
+                        status = TaskStatus.PENDING,
+                        createdAt = System.currentTimeMillis()
+                    )
+
+                    // 添加任务到列表
+                    allTasks = allTasks + task
+
+                    navigateTo(Screen.TranscodeProgress(task))
+
+                    // 开始格式转换
+                    scope.launch {
+                        println("AppNavigation: 开始监听格式转换进度 - 任务ID: ${task.id}")
+                        ffmpegService.startTranscode(task).collect { progress ->
+                            println("AppNavigation: 收到进度更新 - 状态: ${progress.status}, 进度: ${progress.progress}")
+                            currentProgress = progress
+                            taskProgressMap = taskProgressMap + (task.id to progress)
+                            if (progress.status == TaskStatus.COMPLETED) {
+                                println("AppNavigation: 格式转换完成，状态已更新")
+                            }
+                        }
+                        println("AppNavigation: 格式转换Flow已结束")
+                    }
+                }
+            )
+        }
+        
         is Screen.TranscodeProgress -> {
             val progress = currentProgress ?: TranscodeProgress(
                 taskId = screen.task.id,
@@ -239,8 +289,8 @@ fun AppNavigation(
                     }
                 },
                 onComplete = {
-                    // 转码完成，可以添加完成后的操作
-                    navigateBack()
+                    // 转码完成，返回主页
+                    navigateToHome()
                 }
             )
         }

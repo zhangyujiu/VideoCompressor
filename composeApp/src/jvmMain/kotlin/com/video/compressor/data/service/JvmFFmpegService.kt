@@ -37,7 +37,7 @@ class JvmFFmpegService : FFmpegService {
             taskStatuses[task.id] = TaskStatus.RUNNING
             
             // 构建FFmpeg命令
-            val command = buildFFmpegCommand(task)
+            val (command, actualOutputPath) = buildFFmpegCommand(task)
             val ffmpegPath = FFmpegManager.getFFmpegPath()
             
             if (ffmpegPath == null) {
@@ -48,6 +48,19 @@ class JvmFFmpegService : FFmpegService {
                     errorMessage = "FFmpeg不可用"
                 ))
                 return@flow
+            }
+            
+            println("JVM转码: 开始转码 - 任务ID: ${task.id}")
+            println("JVM转码: 输入文件: ${task.inputFile.path}")
+            println("JVM转码: 输出路径: $actualOutputPath")
+            println("JVM转码: FFmpeg命令: ${command.joinToString(" ")}")
+            
+            // 确保输出目录存在
+            val outputFileForDir = java.io.File(actualOutputPath)
+            val outputDir = outputFileForDir.parentFile
+            if (outputDir != null && !outputDir.exists()) {
+                outputDir.mkdirs()
+                println("JVM转码: 创建输出目录: ${outputDir.absolutePath}")
             }
             
             // 启动FFmpeg进程
@@ -140,12 +153,11 @@ class JvmFFmpegService : FFmpegService {
             println("JVM转码: 进程完成，退出码: $exitCode")
 
             // 检查输出文件是否存在
-            val outputPath = generateOutputPath(task.inputFile.path, task.outputPath)
-            val outputFile = java.io.File(outputPath)
+            val outputFile = java.io.File(actualOutputPath)
             val fileExists = outputFile.exists()
             val fileSize = if (fileExists) outputFile.length() else 0
 
-            println("JVM转码: 输出文件检查 - 存在: $fileExists, 大小: $fileSize bytes")
+            println("JVM转码: 输出文件检查 - 路径: $actualOutputPath, 存在: $fileExists, 大小: $fileSize bytes")
 
             if (exitCode == 0 && fileExists && fileSize > 0 && taskStatuses[task.id] != TaskStatus.CANCELLED) {
                 taskStatuses[task.id] = TaskStatus.COMPLETED
@@ -231,7 +243,7 @@ class JvmFFmpegService : FFmpegService {
         return listOf("mp4", "mov", "avi", "mkv", "webm", "gif")
     }
     
-    private fun buildFFmpegCommand(task: TranscodeTask): List<String> {
+    private fun buildFFmpegCommand(task: TranscodeTask): Pair<List<String>, String> {
         val command = mutableListOf<String>()
         val ffmpegPath = FFmpegManager.getFFmpegPath() ?: "ffmpeg"
         
@@ -278,7 +290,7 @@ class JvmFFmpegService : FFmpegService {
         val outputPath = generateOutputPath(task.inputFile.path, task.outputPath)
         command.add(outputPath)
         
-        return command
+        return Pair(command, outputPath)
     }
     
     private suspend fun simulateTranscodeProgress(

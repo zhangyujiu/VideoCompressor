@@ -145,14 +145,17 @@ class AndroidFFmpegService(
                 return@flow
             }
 
+            // 生成实际的输出路径（只生成一次，确保一致性）
+            val actualOutputPath = getValidOutputPath(task.outputPath)
+            
             android.util.Log.d("AndroidFFmpegService", "开始转码任务: ${task.id}")
             android.util.Log.d("AndroidFFmpegService", "输入文件: ${task.inputFile.path}")
-            android.util.Log.d("AndroidFFmpegService", "输出文件: $outputPath")
+            android.util.Log.d("AndroidFFmpegService", "输出文件: $actualOutputPath")
 
             taskStatuses[task.id] = TaskStatus.RUNNING
 
-            // 构建并验证FFmpeg命令
-            val command = buildAndValidateFFmpegCommand(task)
+            // 构建并验证FFmpeg命令，传入实际输出路径
+            val command = buildAndValidateFFmpegCommandWithPath(task, actualOutputPath)
 
             emit(TranscodeProgress(
                 taskId = task.id,
@@ -182,9 +185,8 @@ class AndroidFFmpegService(
                     if (ReturnCode.isSuccess(session.returnCode) &&
                         taskStatuses[task.id] != TaskStatus.CANCELLED) {
 
-                        // 验证输出文件是否真的存在 - 检查多个可能的位置
-                        val outputPath = getValidOutputPath(task.outputPath)
-                        val foundFile = findOutputFile(outputPath, task.outputPath)
+                        // 验证输出文件是否真的存在 - 使用之前生成的实际输出路径
+                        val foundFile = findOutputFile(actualOutputPath, task.outputPath)
 
                         if (foundFile != null && foundFile.exists() && foundFile.length() > 0) {
                             taskStatuses[task.id] = TaskStatus.COMPLETED
@@ -330,7 +332,7 @@ class AndroidFFmpegService(
 
                 // 每10次检查（5秒）检查一次输出文件
                 if (progressCheckCount % 10 == 0) {
-                    val outputFile = java.io.File(getValidOutputPath(task.outputPath))
+                    val outputFile = java.io.File(actualOutputPath)
                     android.util.Log.d("AndroidFFmpegService", "进度检查 #$progressCheckCount: 输出文件存在=${outputFile.exists()}, 大小=${outputFile.length()}")
                 }
 
@@ -444,6 +446,15 @@ class AndroidFFmpegService(
         // 使用最简单的测试命令
         android.util.Log.d("AndroidFFmpegService", "使用测试命令策略")
         return buildTestFFmpegCommand(task)
+    }
+
+    /**
+     * 构建并验证FFmpeg命令，使用指定的输出路径
+     */
+    private fun buildAndValidateFFmpegCommandWithPath(task: TranscodeTask, outputPath: String): String {
+        // 使用最简单的测试命令，但使用指定的输出路径
+        android.util.Log.d("AndroidFFmpegService", "使用测试命令策略，输出路径: $outputPath")
+        return buildTestFFmpegCommandWithPath(task, outputPath)
     }
 
     private fun buildFFmpegCommand(task: TranscodeTask): String {
@@ -741,6 +752,32 @@ class AndroidFFmpegService(
 
         val command = commandParts.joinToString(" ")
         android.util.Log.d("AndroidFFmpegService", "测试FFmpeg命令: $command")
+
+        return command
+    }
+
+    /**
+     * 构建测试FFmpeg命令，使用指定的输出路径
+     */
+    private fun buildTestFFmpegCommandWithPath(task: TranscodeTask, outputPath: String): String {
+        val commandParts = mutableListOf<String>()
+
+        // 输入文件
+        commandParts.add("-i")
+        commandParts.add(task.inputFile.path)
+
+        // 最简单的复制命令，不重新编码
+        commandParts.add("-c")
+        commandParts.add("copy")
+
+        // 覆盖输出文件
+        commandParts.add("-y")
+
+        // 输出文件 - 使用传入的路径
+        commandParts.add(outputPath)
+
+        val command = commandParts.joinToString(" ")
+        android.util.Log.d("AndroidFFmpegService", "测试FFmpeg命令（指定路径）: $command")
 
         return command
     }
